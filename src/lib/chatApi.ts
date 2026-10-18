@@ -76,44 +76,44 @@ const FRIENDLY_MESSAGES: Record<ChatErrorCode, Record<Language, string>> = {
     hi: 'AI बैकएंड से कनेक्ट नहीं हो पा रहा। सर्वर चालू है यह जाँचें — इस बीच बिल्ट-इन उत्तर दिखाए जा रहे हैं।',
   },
   timeout: {
-    en: 'The model took too long to respond — showing built-in answers for now.',
-    hi: 'मॉडल का उत्तर आने में बहुत समय लगा — इस बीच बिल्ट-इन उत्तर दिखाए जा रहे हैं।',
+    en: 'The Gemini model took too long to respond — showing local telemetry snapshot.',
+    hi: 'Gemini मॉडल का उत्तर आने में बहुत समय लगा — इस बीच स्थानीय डेटा दिखाया जा रहा है।',
   },
   rate_limit: {
-    en: 'The model is rate limited right now — showing built-in answers for now. Try again shortly.',
-    hi: 'मॉडल अभी रेट लिमिटेड है — इस बीच बिल्ट-इन उत्तर दिखाए जा रहे हैं। थोड़ी देर बाद पुनः प्रयास करें।',
+    en: 'The Gemini service is rate limited right now — showing local telemetry snapshot.',
+    hi: 'Gemini सेवा रेट लिमिटेड है — इस बीच स्थानीय डेटा दिखाया जा रहा है।',
   },
   missing_key: {
-    en: "AI isn't configured yet — set OPENROUTER_API_KEY in the server .env file. Showing built-in answers for now.",
-    hi: 'AI सेटअप अधूरा है — सर्वर की .env में OPENROUTER_API_KEY सेट करें। इस बीच बिल्ट-इन उत्तर दिखाए जा रहे हैं।',
+    en: "Gemini isn't configured yet — set GEMINI_API_KEY in the server .env file. Showing local telemetry snapshot.",
+    hi: 'Gemini सेटअप अधूरा है — सर्वर .env में GEMINI_API_KEY सेट करें। इस बीच स्थानीय डेटा दिखाया जा रहा है।',
   },
   missing_model: {
-    en: "AI isn't configured yet — set OPENROUTER_MODEL in the server .env file. Showing built-in answers for now.",
-    hi: 'AI सेटअप अधूरा है — सर्वर की .env में OPENROUTER_MODEL सेट करें। इस बीच बिल्ट-इन उत्तर दिखाए जा रहे हैं।',
+    en: "Gemini isn't configured yet — set GEMINI_MODEL in the server .env file. Showing local telemetry snapshot.",
+    hi: 'Gemini सेटअप अधूरा है — सर्वर .env में GEMINI_MODEL सेट करें। इस बीच स्थानीय डेटा दिखाया जा रहा है।',
   },
   auth: {
-    en: 'OpenRouter rejected the API key — showing built-in answers for now.',
-    hi: 'OpenRouter ने API कुंजी अस्वीकार की — इस बीच बिल्ट-इन उत्तर दिखाए जा रहे हैं।',
+    en: 'Gemini rejected the API key — showing local telemetry snapshot.',
+    hi: 'Gemini ने API कुंजी अस्वीकार की — इस बीच स्थानीय डेटा दिखाया जा रहा है।',
   },
   model_unavailable: {
-    en: 'The selected model is unavailable right now — showing built-in answers for now.',
-    hi: 'चुना गया मॉडल अभी उपलब्ध नहीं है — इस बीच बिल्ट-इन उत्तर दिखाए जा रहे हैं।',
+    en: 'The selected Gemini model is unavailable right now — showing local telemetry snapshot.',
+    hi: 'चुना गया Gemini मॉडल अभी उपलब्ध नहीं है — इस बीच स्थानीय डेटा दिखाया जा रहा है।',
   },
   invalid_request: {
-    en: "The assistant didn't understand the request — showing built-in answers for now.",
-    hi: 'सहायक अनुरोज समझ नहीं सका — इस बीच बिल्ट-इन उत्तर दिखाए जा रहे हैं।',
+    en: "The assistant couldn't process your request — showing local telemetry snapshot.",
+    hi: 'सहायक अनुरोध नहीं समझ सका — इस बीच स्थानीय डेटा दिखाया जा रहा है।',
   },
   server_error: {
-    en: "Something went wrong on the server — showing built-in answers for now.",
-    hi: 'सर्वर पर कुछ समस्या हुई — इस बीच बिल्ट-इन उत्तर दिखाए जा रहे हैं।',
+    en: "Something went wrong on the server — showing local telemetry snapshot.",
+    hi: 'सर्वर पर कुछ समस्या हुई — इस बीच स्थानीय डेटा दिखाया जा रहा है।',
   },
   upstream: {
-    en: 'The AI service is unavailable right now — showing built-in answers for now.',
-    hi: 'AI सेवा अभी अनुपलब्ध है — इस बीच बिल्ट-इन उत्तर दिखाए जा रहे हैं।',
+    en: 'The Gemini service is unavailable right now — showing local telemetry snapshot.',
+    hi: 'Gemini सेवा अभी अनुपलब्ध है — इस बीच स्थानीय डेटा दिखाया जा रहा है।',
   },
   unknown: {
-    en: "Couldn't get an answer from the assistant — showing built-in answers for now.",
-    hi: 'सहायक से उत्तर नहीं मिल सका — इस बीच बिल्ट-इन उत्तर दिखाए जा रहे हैं।',
+    en: "Couldn't get an answer from the assistant — showing local telemetry snapshot.",
+    hi: 'सहायक से उत्तर नहीं मिल सका — इस बीच स्थानीय डेटा दिखाया जा रहा है।',
   },
 }
 

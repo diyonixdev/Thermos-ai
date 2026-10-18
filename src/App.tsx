@@ -36,7 +36,7 @@ import { LanguageProvider, useLanguage } from './i18n/LanguageContext'
 import { formatHeaderDate, formatHeaderTime } from './i18n/translations'
 import type { TranslationKey } from './i18n/translations'
 import { TelemetryProvider, useTelemetry } from './telemetry/useTelemetry'
-import { classifyQuestion, answerQuestion } from './telemetry/questionResolver'
+
 import { useVoiceAssistant } from './telemetry/useVoiceAssistant'
 import { friendlyChatError, sendChatWithRetry } from './lib/chatApi'
 import { createUtterance } from './telemetry/speechController'
@@ -971,18 +971,16 @@ function AIAssistantPanel({ volume = 70 }: { volume?: number }) {
           console.log('[ThermosAI] Ignoring stale LLM error after interruption')
           return
         }
-        const fallback = answerQuestion(classifyQuestion(text), telemetry, language)
-        const fallbackLabel = language === 'hi' ? ' (स्थानीय उत्तर — AI उपलब्ध नहीं)' : ' (local answer — AI unavailable)'
-        setMessages((prev) => [...prev, { role: 'assistant', text: fallback + (isRateLimit ? (language === 'hi' ? ' — रेट लिमिट. रीट्राइ करें।' : ' — Rate limited. Retry.') : '') + fallbackLabel, time: timeStr }])
+        const errorMsg = isRateLimit
+          ? (language === 'hi' ? 'रेट लिमिट। कृपya पुनः प्रयास करें।' : 'Rate limited — please try again shortly.')
+          : (language === 'hi' ? 'मैं अभी उत्तर नहीं दे सकता। कृपya कुछ क्षण बाद पुनः प्रयास करें।' : 'I am temporarily unable to answer. Please try again shortly.')
+        setMessages((prev) => [...prev, { role: 'assistant', text: errorMsg, time: timeStr }])
         if (isRateLimit) {
           setRetryText(text)
           setNotice(language === 'hi' ? 'रेट लिमिट। कृपya पुनः प्रयास करें।' : 'Rate limited. Try again shortly.')
         } else {
           setRetryText(null)
           setNotice(friendlyChatError(error, language))
-        }
-        if (isSupported && !agentPaused) {
-          speak(fallback + (isRateLimit ? (language === 'hi' ? ' — रेट लिमिट।' : ' — Rate limited.') : ''))
         }
       })
       .finally(() => {

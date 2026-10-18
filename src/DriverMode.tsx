@@ -3,7 +3,6 @@ import { Leaf, Mic, Send, Battery, Cog, Thermometer, Activity, Clock3, Zap, Truc
 import { useLanguage } from './i18n/LanguageContext'
 import { useTelemetry } from './telemetry/useTelemetry'
 import { sendChatWithRetry } from './lib/chatApi'
-import { classifyQuestion, answerQuestion } from './telemetry/questionResolver'
 import { useVoiceAssistant } from './telemetry/useVoiceAssistant'
 import { createUtterance } from './telemetry/speechController'
 
@@ -26,6 +25,16 @@ export function DriverModePanel({ onClose, volume = 70 }: { onClose: () => void;
 
   useEffect(() => { messagesRef.current = messages }, [messages])
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
+
+  // Update greeting text when language changes
+  useEffect(() => {
+    setMessages((prev) => {
+      if (prev.length === 1 && prev[0].role === 'assistant') {
+        return [{ ...prev[0], text: language === 'hi' ? 'नमस्ते! मैं Thermos AI हूँ, आपका स्मार्ट ऊर्जा सहायक।' : "Hello! I'm Thermos AI, your intelligent energy assistant.", time: prev[0].time }]
+      }
+      return prev
+    })
+  }, [language])
 
   // Speak greeting once when permitted (shared speech controller, no duplicate)
   useEffect(() => {
@@ -63,7 +72,7 @@ export function DriverModePanel({ onClose, volume = 70 }: { onClose: () => void;
       })
       .catch((_err) => {
         if (interrupted || controller.signal.aborted) return
-        const fallback = answerQuestion(classifyQuestion(text), telemetry, language)
+        const fallback = telemetry ? `Battery ${Math.round(telemetry.batteryCharge)}%, RPM ${Math.round(telemetry.rpm)}, Temp ${Math.round(telemetry.temperatureCelsius)}°C, Pressure ${telemetry.pressureBar} bar, Recovered ${telemetry.recoveredPowerWatts} W` : 'Telemetry unavailable';
         setMessages((prev) => [...prev, { role: 'assistant', text: fallback + ' (local answer — AI unavailable)', time: timeStr }])
         if (isSupported && !agentPaused) speak(fallback + ' (local answer — AI unavailable)')
       })

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 dotenv.config({ path: path.join(__dirname, '..', '.env') })
 
-const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
+const GEMINI_URL = (model) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`
 const DEFAULT_TIMEOUT_MS = 30000
 const MAX_MESSAGES = 20
 const TELEMETRY_FIELDS = [
@@ -17,8 +17,8 @@ function fail(res, status, code, message) {
 }
 
 function readConfig() {
-  const apiKey = (process.env.OPENROUTER_API_KEY || '').trim()
-  const model = (process.env.OPENROUTER_MODEL || process.env.OPENROUTER_MODEl || '').trim()
+  const apiKey = (process.env.GEMINI_API_KEY || '').trim()
+  const model = (process.env.GEMINI_MODEL || 'gemini-2.5-flash').trim()
   const rawTimeout = parseInt(process.env.OPENROUTER_TIMEOUT_MS || '', 10)
   const timeoutMs = Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : DEFAULT_TIMEOUT_MS
   return { apiKey, model, timeoutMs }
@@ -71,23 +71,31 @@ export default async function handler(req, res) {
     if (!model) return res.status(503).json({ error: { code: 'missing_model', message: 'OPENROUTER_MODEL not configured.' } })
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
-    const upstream = await fetch(OPENROUTER_URL, {
+    const systemPrompt = buildSystemPrompt(language, telemetry)
+    const requestPayload = JSON.stringify({
+      contents: [
+        { role: 'user', parts: [{ text: systemPrompt }] },
+        ...validated.messages.map((item) => ({ role: item.role === 'user' ? 'user' : 'model', parts: [{ text: item.content }] })),
+      ],
+      generationConfig: { temperature: 0.6, maxOutputTokens: 700 },
+    })
+    console.log(`[DEBUG] /api/chat | env-loaded=${process.env.GEMINI_API_KEY ? 'yes' : 'no'} | model=${model} | apiKeyPresent=${Boolean(apiKey)} | payload-length=${requestPayload.length}`)
+    const upstream = await fetch(GEMINI_URL(model) + `?key=${apiKey}`, {
       method: 'POST',
       signal: controller.signal,
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({ model, messages: [{ role: 'system', content: buildSystemPrompt(language, telemetry) }, ...validated.messages], temperature: 0.6, max_tokens: 700 }),
+      headers: { 'Content-Type': 'application/json' },
+      body: requestPayload,
     })
     const data = await upstream.json().catch(() => null)
     if (!upstream.ok) {
       const msg = typeof data?.error?.message === 'string' ? data.error.message.slice(0, 300) : ''
       console.log(`[vercel] upstream ${upstream.status} in ${Date.now() - startedAt}ms | model=${model}`)
       if (upstream.status === 429) return res.status(429).json({ error: { code: 'rate_limit', message: msg || 'Rate limit reached.' } })
-      if (upstream.status === 401 || upstream.status === 402 || upstream.status === 403) return res.status(502).json({ error: { code: 'auth', message: 'OpenRouter rejected the API key.' } })
-      if (/model/i.test(msg) && /(not found|unknown|invalid|does not exist|unsupported)/i.test(msg)) return res.status(502).json({ error: { code: 'model_unavailable', message: msg || 'Model unavailable.' } })
-      return res.status(502).json({ error: { code: 'upstream', message: msg || 'OpenRouter request failed.' } })
+      if (upstream.status === 401 || upstream.status === 402 || upstream.status === 403) return res.status(502).json({ error: { code: 'auth', message: 'Gemini API key rejected.' } })
+      return res.status(502).json({ error: { code: 'upstream', message: msg || 'Gemini request failed.' } })
     }
-    const reply = data?.choices?.[0]?.message?.content
-    if (typeof reply !== 'string' || !reply.trim()) return res.status(502).json({ error: { code: 'upstream', message: 'Empty model response.' } })
+    const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text
+    if (typeof reply !== 'string' || !reply.trim()) return res.status(502).json({ error: { code: 'upstream', message: 'The model returned an empty response.' } })
     console.log(`[vercel] ok in ${Date.now() - startedAt}ms | lang=${language} | model=${model}`)
     return res.status(200).json({ reply: reply.trim(), model })
   } catch (error) {
