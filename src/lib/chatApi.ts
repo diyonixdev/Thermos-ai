@@ -1,0 +1,163 @@
+import type { Language } from '../i18n/translations'
+import type { TelemetryData } from '../telemetry/types'
+
+export interface ChatTurn {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+export interface SendChatOptions {
+  messages: ChatTurn[]
+  language: Language
+  telemetry: TelemetryData
+  timeoutMs?: number
+  signal?: AbortSignal
+}
+
+const CHAT_ERROR_CODES = [
+  'network',
+  'timeout',
+  'rate_limit',
+  'missing_key',
+  'missing_model',
+  'auth',
+  'model_unavailable',
+  'invalid_request',
+  'server_error',
+  'upstream',
+  'unknown',
+] as const
+
+export type ChatErrorCode = (typeof CHAT_ERROR_CODES)[number]
+
+const DEFAULT_TIMEOUT_MS = 40000
+
+export async function sendChatWithRetry(options: SendChatOptions, maxRetries = 2): Promise<string> {
+  let lastError: unknown
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const result = await sendChat(options)
+      return result
+    } catch (error) {
+      lastError = error
+      if (error instanceof ChatError && error.code === 'rate_limit' && attempt < maxRetries) {
+        // Bounded exponential backoff with jitter: 1000ms * 2^attempt + random 0-1000ms
+        const base = 1000 * Math.pow(2, attempt)
+        const jitter = Math.random() * 1000
+        const delay = Math.min(base + jitter, 8000)
+        console.log(`[ThermosAI DEBUG] Rate limit hit — retry ${attempt + 1}/${maxRetries} in ${Math.round(delay)}ms`)
+        await new Promise((r) => setTimeout(r, delay))
+        continue
+      }
+      // Do not retry abort, auth, missing key/model, invalid request, model unavailable
+      throw error
+    }
+  }
+  throw lastError
+}
+
+export class ChatError extends Error {
+  code: ChatErrorCode
+
+  constructor(code: ChatErrorCode, message?: string) {
+    super(message || code)
+    this.name = 'ChatError'
+    this.code = code
+  }
+}
+
+function isChatErrorCode(value: unknown): value is ChatErrorCode {
+  return typeof value === 'string' && (CHAT_ERROR_CODES as readonly string[]).includes(value)
+}
+
+const FRIENDLY_MESSAGES: Record<ChatErrorCode, Record<Language, string>> = {
+  network: {
+    en: "I can't reach the Thermos AI backend. Check that the server is running — showing built-in answers for now.",
+    hi: 'AI बैकएंड से कनेक्ट नहीं हो पा रहा। सर्वर चालू है यह जाँचें — इस बीच बिल्ट-इन उत्तर दिखाए जा रहे हैं।',
+  },
+  timeout: {
+    en: 'The model took too long to respond — showing built-in answers for now.',
+    hi: 'मॉडल का उत्तर आने में बहुत समय लगा — इस बीच बिल्ट-इन उत्तर दिखाए जा रहे हैं।',
+  },
+  rate_limit: {
+    en: 'The model is rate limited right now — showing built-in answers for now. Try again shortly.',
+    hi: 'मॉडल अभी रेट लिमिटेड है — इस बीच बिल्ट-इन उत्तर दिखाए जा रहे हैं। थोड़ी देर बाद पुनः प्रयास करें।',
+  },
+  missing_key: {
+    en: "AI isn't configured yet — set OPENROUTER_API_KEY in the server .env file. Showing built-in answers for now.",
+    hi: 'AI सेटअप अधूरा है — सर्वर की .env में OPENROUTER_API_KEY सेट करें। इस बीच बिल्ट-इन उत्तर दिखाए जा रहे हैं।',
+  },
+  missing_model: {
+    en: "AI isn't configured yet — set OPENROUTER_MODEL in the server .env file. Showing built-in answers for now.",
+    hi: 'AI सेटअप अधूरा है — सर्वर की .env में OPENROUTER_MODEL सेट करें। इस बीच बिल्ट-इन उत्तर दिखाए जा रहे हैं।',
+  },
+  auth: {
+    en: 'OpenRouter rejected the API key — showing built-in answers for now.',
+    hi: 'OpenRouter ने API कुंजी अस्वीकार की — इस बीच बिल्ट-इन उत्तर दिखाए जा रहे हैं।',
+  },
+  model_unavailable: {
+    en: 'The selected model is unavailable right now — showing built-in answers for now.',
+    hi: 'चुना गया मॉडल अभी उपलब्ध नहीं है — इस बीच बिल्ट-इन उत्तर दिखाए जा रहे हैं।',
+  },
+  invalid_request: {
+    en: "The assistant didn't understand the request — showing built-in answers for now.",
+    hi: 'सहायक अनुरोज समझ नहीं सका — इस बीच बिल्ट-इन उत्तर दिखाए जा रहे हैं।',
+  },
+  server_error: {
+    en: "Something went wrong on the server — showing built-in answers for now.",
+    hi: 'सर्वर पर कुछ समस्या हुई — इस बीच बिल्ट-इन उत्तर दिखाए जा रहे हैं।',
+  },
+  upstream: {
+    en: 'The AI service is unavailable right now — showing built-in answers for now.',
+    hi: 'AI सेवा अभी अनुपलब्ध है — इस बीच बिल्ट-इन उत्तर दिखाए जा रहे हैं।',
+  },
+  unknown: {
+    en: "Couldn't get an answer from the assistant — showing built-in answers for now.",
+    hi: 'सहायक से उत्तर नहीं मिल सका — इस बीच बिल्ट-इन उत्तर दिखाए जा रहे हैं।',
+  },
+}
+
+interface ChatApiResponse {
+  reply?: unknown
+  error?: { code?: unknown; message?: unknown }
+}
+
+export async function sendChat(options: SendChatOptions): Promise<string> {
+  const { messages, language, telemetry, timeoutMs = DEFAULT_TIMEOUT_MS, signal: externalSignal } = options
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: externalSignal || controller.signal,
+      body: JSON.stringify({ messages, language, telemetry }),
+    })
+
+    const payload: ChatApiResponse | null = await response.json().catch(() => null)
+
+    if (!response.ok) {
+      const code = payload?.error?.code
+      const message = typeof payload?.error?.message === 'string' ? payload.error.message : undefined
+      throw new ChatError(isChatErrorCode(code) ? code : 'unknown', message)
+    }
+
+    const reply = payload?.reply
+    if (typeof reply !== 'string' || !reply.trim()) {
+      throw new ChatError('upstream')
+    }
+    return reply.trim()
+  } catch (error) {
+    if (error instanceof ChatError) throw error
+    if ((error as Error)?.name === 'AbortError') throw new ChatError('timeout')
+    throw new ChatError('network')
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+export function friendlyChatError(error: unknown, language: Language): string {
+  const code = error instanceof ChatError && isChatErrorCode(error.code) ? error.code : 'unknown'
+  return FRIENDLY_MESSAGES[code][language]
+}
