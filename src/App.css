@@ -20,8 +20,9 @@
 
   width: 100vw;
   height: 100dvh;
-  min-width: 1180px;
-  overflow: hidden;
+  min-width: 320px;
+  overflow-x: auto;
+  overflow-y: hidden;
   color: var(--text);
   background:
     radial-gradient(circle at 20% 6%, rgba(34, 245, 160, 0.12), transparent 24%),
@@ -1218,6 +1219,69 @@
     transform: scaleY(0.52);
     opacity: 0.45;
   }
+}
+
+@media (max-width: 1024px) {
+  .dashboard {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr auto;
+    padding: 8px 12px;
+    gap: 8px;
+  }
+  .dashboard-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .left-column {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    grid-template-rows: auto;
+  }
+  .center-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .telemetry-body {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+  .energy-panel .metric-row {
+    grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  }
+  .driver-overlay .driver-panel {
+    width: 98vw;
+    padding: 12px;
+  }
+  .topbar {
+    grid-template-columns: auto 1fr auto;
+    gap: 6px;
+    padding: 6px 10px;
+  }
+  .brand-title { font-size: 22px; }
+  .brand-subtitle { font-size: 11px; }
+}
+
+@media (max-width: 768px) {
+  .dashboard {
+    padding: 6px 8px;
+  }
+  .left-column {
+    grid-template-columns: 1fr;
+  }
+  .panel-heading { padding: 8px 10px; }
+  .telemetry-body { padding: 4px 10px 8px; }
+  .arc-gauge { min-width: 0; }
+  .energy-panel { grid-template-rows: 48px 1fr 100px; }
+  .metric-card { padding: 10px 12px; }
+  .chat-panel { min-height: 0; }
+  .assistant-panel { display: flex; flex-direction: column; }
+  .chat-window { max-height: 260px; }
+  .voice-control { padding-top: 2px; }
+  .chat-input { height: 44px; }
+  .diagnostic-footer { font-size: 11px; padding: 0 4px; }
+  .volume-popover { min-width: 140px; padding: 8px; right: -10px; }
 }
 
 @media (max-width: 1450px) {
