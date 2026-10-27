@@ -61,7 +61,7 @@ export default async function handler(req, res) {
   try {
     if (req.method !== 'POST') return res.status(405).json({ error: { code: 'invalid_request', message: 'POST only' } })
     const body = req.body || {}
-    const validated = { messages: Array.isArray(body.messages) ? body.messages.slice(0, 20) : [] }
+    const validated = { messages: Array.isArray(body.messages) ? body.messages.slice(0, MAX_MESSAGES) : [] }
     if (!validated.messages.length || validated.messages.some((m) => !m || typeof m !== 'object' || (m.role !== 'user' && m.role !== 'assistant') || typeof m.content !== 'string' || !m.content.trim())) {
       return res.status(400).json({ error: { code: 'invalid_request', message: 'messages must be non-empty array of user/assistant with string content.' } })
     }
