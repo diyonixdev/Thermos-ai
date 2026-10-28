@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
   Battery,
@@ -34,14 +34,14 @@ import {
 import './App.css'
 import { LanguageProvider, useLanguage } from './i18n/LanguageContext'
 import { formatHeaderDate, formatHeaderTime } from './i18n/translations'
-import type { TranslationKey } from './i18n/translations'
+import type { Language, TranslationKey } from './i18n/translations'
 import { TelemetryProvider, useTelemetry } from './telemetry/useTelemetry'
 
 import { useVoiceAssistant } from './telemetry/useVoiceAssistant'
-import { friendlyChatError, sendChatWithRetry } from './lib/chatApi'
-import { createUtterance } from './telemetry/speechController'
+import { useAssistantChat } from './telemetry/useAssistantChat'
+import { cancelSpeech, isVoiceOutputEnabled, speakOnce } from './telemetry/speechController'
+import { diag } from './lib/diagnostics'
 import { DriverModePanel } from './DriverMode'
-import type { ChatTurn } from './lib/chatApi'
 
 type Theme = 'dark' | 'light'
 
@@ -69,6 +69,11 @@ const assistantChipLabels: Record<AssistantChip, TranslationKey> = {
   pressure: 'chart.pressure',
   allSystems: 'assistant.allSystems',
 }
+
+const GREETING_EN =
+  "Hello! I'm Turbo AI, your intelligent energy assistant. How can I help you today? You can ask me about battery charging time, engine RPM, exhaust temperature, or pressure."
+const GREETING_HI =
+  'नमस्ते! मैं टर्बो AI हूँ, आपका स्मार्ट ऊर्जा सहायक। मैं आपकी क्या मदद कर सकता हूँ? आप मुझसे बैटरी चार्ज होने के समय, इंजन RPM, एग्जॉस्ट तापमान या दबाव के बारे में पूछ सकते हैं।'
 
 /* ================= Main App ================= */
 
@@ -136,9 +141,7 @@ function TopStatusBar({ theme, onToggleTheme, volume, setVolume, isMute, setIsMu
 
   // Immediately mute current audible output when muted
   useEffect(() => {
-    if (isMute && typeof window !== 'undefined' && window.speechSynthesis) {
-      window.speechSynthesis.cancel()
-    }
+    if (isMute) cancelSpeech('muted')
   }, [isMute])
 
   useEffect(() => {
@@ -164,7 +167,7 @@ function TopStatusBar({ theme, onToggleTheme, volume, setVolume, isMute, setIsMu
         </div>
         <div>
           <div className="brand-title">
-            THERMOS <span>AI</span>
+            TURBO <span>AI</span>
           </div>
           <div className="brand-subtitle">
             {t('header.subtitle')} <i />
@@ -815,199 +818,55 @@ function AIAssistantPanel({ volume = 70 }: { volume?: number }) {
   const { telemetry } = useTelemetry()
   const [chip, setChip] = useState<AssistantChip>('batteryEta')
   const [input, setInput] = useState('')
-  const greetingEn = "Hello! I'm Thermos AI, your intelligent energy assistant. How can I help you today? You can ask me about battery charging time, engine RPM, exhaust temperature, or pressure."
-  const greetingHi = "नमस्ते! मैं Thermos AI हूँ, आपका स्मार्ट ऊर्जा सहायक। मैं आपकी क्या मदद कर सकता हूँ? आप मुझसे बैटरी चार्ज होने के समय, इंजन RPM, एग्जॉस्ट तापमान या दबाव के बारे में पूछ सकते हैं।"
-  const pendingGreetingRef = useRef<string | null>(null)
 
+  const greeting = language === 'hi' ? GREETING_HI : GREETING_EN
   const volumeLevel = (volume ?? 70) / 100
 
-  const [messages, setMessages] = useState<{ role: 'user' | 'assistant'; text: string; time: string }[]>([
-    {
-      role: 'assistant',
-      text: language === 'hi' ? greetingHi : greetingEn,
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    },
-  ])
-  const [loading, setLoading] = useState(false)
-  const [notice, setNotice] = useState<string | null>(null)
-  const [retryText, setRetryText] = useState<string | null>(null)
-  const [interrupted, setInterrupted] = useState(false)
-  const [agentPaused, setAgentPaused] = useState(false)
-  const abortControllerRef = useRef<AbortController | null>(null)
-  const lastProcessedRef = useRef<{ text: string; time: number } | null>(null)
+  const voice = useVoiceAssistant(language, volumeLevel)
+  const { messages, loading, notice, retryText, agentPaused, ask, retry, interrupt, togglePause, clearChat } =
+    useAssistantChat({ language, voice, greeting })
+
   const messagesEndRef = useRef<HTMLDivElement | null>(null)
-  const messagesRef = useRef(messages)
-  const spokenLangRef = useRef<string | null>(null)
-  const { state: voiceState, message: voiceMessage, isSupported, continuous, startListening, stopListening, speak, stopSpeaking } = useVoiceAssistant(language, volumeLevel)
+  const spokenLangRef = useRef<Language | null>(null)
+
+  // Greeting waits while a question or an answer is in flight so it can never
+  // interrupt a user-requested answer.
+  const greetingBusy = loading || voice.state === 'processing' || voice.state === 'speaking'
 
   useEffect(() => {
-    messagesRef.current = messages
-  }, [messages])
-
-  // Update greeting when language changes (if conversation hasn't expanded beyond greeting)
-  useEffect(() => {
-    setMessages((prev) => {
-      if (prev.length === 1 && prev[0].role === 'assistant') {
-        return [{ ...prev[0], text: language === 'hi' ? greetingHi : greetingEn }]
-      }
-      return prev
-    })
-  }, [language])
-
-  // Auto-speak welcome greeting with diagnostics and autoplay fallback
-  useEffect(() => {
-    const text = language === 'hi' ? greetingHi : greetingEn
-    console.log('[ThermosAI] Greeting initialized: ' + language)
-    console.log('[ThermosAI] Selected language: ' + (language === 'hi' ? 'hi-IN' : 'en-IN'))
-    pendingGreetingRef.current = text
-    if (typeof window !== 'undefined' && window.speechSynthesis) {
-      const voices = window.speechSynthesis.getVoices()
-      console.log('[ThermosAI] Speech voices loaded: ' + voices.length)
-      const match = voices.find((v: any) => v.lang === (language === 'hi' ? 'hi-IN' : 'en-IN'))
-      if (match) console.log('[ThermosAI] Voice match found: ' + match.name)
-    }
-    if (spokenLangRef.current === language) {
-      console.log('[ThermosAI] Already greeted for ' + language + ', skipping playback')
+    if (spokenLangRef.current === language) return
+    if (greetingBusy) return
+    if (!isVoiceOutputEnabled()) {
+      spokenLangRef.current = language
+      diag('greeting', 'skipped-muted', { lang: language })
       return
     }
     spokenLangRef.current = language
-    console.log('[ThermosAI] Greeting queued: ' + text.substring(0, 40) + '...')
-    const utter = createUtterance(text, language === 'hi' ? 'hi' : 'en')
-    utter.rate = 1.05
-    utter.pitch = 1
-    console.log('[DEBUG VOLUME] Greeting utterance created via controller (effectiveVolume from localStorage)')
-    let spoke = false
-    const checkStart = setTimeout(() => {
-      if (!spoke) {
-        console.log('[ThermosAI] Greeting did not start, marking pending for interaction')
-        pendingGreetingRef.current = text
-      }
-    }, 800)
-    try {
-      window.speechSynthesis.cancel()
-      window.speechSynthesis.speak(utter)
-      console.log('[ThermosAI] Greeting speech scheduled')
-    } catch (e) {
-      console.log('[ThermosAI] Greeting speak threw, pending for interaction', e)
-      pendingGreetingRef.current = text
-    }
-    utter.onerror = (e: any) => {
-      console.log('[ThermosAI] Greeting speech error', e.error || e)
-      pendingGreetingRef.current = text
-    }
-    utter.onstart = () => {
-      spoke = true
-      clearTimeout(checkStart)
-      console.log('[ThermosAI] Greeting speech started')
-    }
-    utter.onend = () => {
-      clearTimeout(checkStart)
-      console.log('[ThermosAI] Greeting speech ended')
-      if (continuous) {
-        console.log('[ThermosAI] Recognition started after greeting')
-        try { startListening((txt) => processQuestion(txt)) } catch(e){}
-      }
-    }
-  }, [language])
+    diag('greeting', 'play', { lang: language })
+    void speakOnce(greeting, language === 'hi' ? 'hi' : 'en').then((outcome) => {
+      diag('greeting', 'outcome', { outcome })
+    })
+  }, [language, greeting, greetingBusy])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  const processQuestion = useCallback((text: string) => {
-    if (agentPaused) {
-      setNotice(language === 'hi' ? 'सहायक रुका हुआ है — कृपया पहले Resume करें।' : 'Agent is paused — please resume first.')
-      return
-    }
-    if (interrupted) {
-      setInterrupted(false)
-    }
-    // Prevent duplicate submissions from rapid recognition restarts
-    const nowMs = Date.now()
-    if (lastProcessedRef.current && lastProcessedRef.current.text === text && (nowMs - lastProcessedRef.current.time) < 2000) {
-      console.log('[ThermosAI DEBUG] Duplicate transcript suppressed: ' + text.substring(0, 30))
-      return
-    }
-    lastProcessedRef.current = { text, time: nowMs }
-
-    // Cancel any previous LLM request before starting a new one
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort()
-    }
-    abortControllerRef.current = new AbortController()
-    const controller = abortControllerRef.current
-
-    const now = new Date()
-    const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    const userEntry = { role: 'user' as const, text, time: timeStr }
-    const history: ChatTurn[] = [...messagesRef.current, userEntry]
-      .slice(-12)
-      .map((msg) => ({ role: msg.role, content: msg.text }))
-    messagesRef.current = [...messagesRef.current, userEntry]
-    setMessages((prev) => [...prev, userEntry])
-    setNotice(null)
-    setLoading(true)
-
-    const requestStart = Date.now()
-    console.log('[ThermosAI DEBUG] Speech recognized -> request start | lang=' + language + ' | textLen=' + text.length)
-    console.log('[ThermosAI DEBUG] Sending chat to LLM | lang=' + language)
-
-    sendChatWithRetry({ messages: history, language, telemetry, signal: controller.signal })
-      .then((reply) => {
-        console.log('[ThermosAI DEBUG] LLM response received | replyLen=' + reply.length)
-        // Ignore stale responses after interruption
-        if (interrupted || controller.signal.aborted) {
-          console.log('[ThermosAI] Ignoring stale LLM response after interruption')
-          return
-        }
-        setMessages((prev) => [...prev, { role: 'assistant', text: reply, time: timeStr }])
-        if (isSupported && !agentPaused) {
-          speak(reply)
-        }
-      })
-      .catch((error) => {
-        const isRateLimit = error instanceof Error && (error as any)?.code === 'rate_limit'
-        if (interrupted || controller.signal.aborted) {
-          console.log('[ThermosAI] Ignoring stale LLM error after interruption')
-          return
-        }
-        const errorMsg = isRateLimit
-          ? (language === 'hi' ? 'रेट लिमिट। कृपya पुनः प्रयास करें।' : 'Rate limited — please try again shortly.')
-          : (language === 'hi' ? 'मैं अभी उत्तर नहीं दे सकता। कृपya कुछ क्षण बाद पुनः प्रयास करें।' : 'I am temporarily unable to answer. Please try again shortly.')
-        setMessages((prev) => [...prev, { role: 'assistant', text: errorMsg, time: timeStr }])
-        if (isRateLimit) {
-          setRetryText(text)
-          setNotice(language === 'hi' ? 'रेट लिमिट। कृपya पुनः प्रयास करें।' : 'Rate limited. Try again shortly.')
-        } else {
-          setRetryText(null)
-          setNotice(friendlyChatError(error, language))
-        }
-      })
-      .finally(() => {
-        console.log('[ThermosAI DEBUG] Processing complete | latencyMs=' + (Date.now() - requestStart) + ' | interrupted=' + interrupted + ' | paused=' + agentPaused)
-        setLoading(false)
-      })
-  }, [telemetry, language, isSupported, speak, interrupted, agentPaused])
+  const statusText = useMemo(() => {
+    if (voice.state === 'processing') return t('voice.processing')
+    if (voice.state === 'speaking') return t('voice.speaking')
+    if (voice.state === 'paused') return t('voice.paused')
+    if (voice.message) return voice.message
+    if (voice.state === 'listening') return t('voice.listening')
+    if (voice.state === 'error') return t('voice.error')
+    return voice.voiceActive ? t('voice.active') : t('assistant.tapToSpeak')
+  }, [voice.state, voice.message, voice.voiceActive, t])
 
   const handleSend = () => {
-    // Play pending greeting on first text interaction if needed
-    if (pendingGreetingRef.current) {
-      const text = pendingGreetingRef.current
-      pendingGreetingRef.current = null
-      const utter = createUtterance(text, language === 'hi' ? 'hi' : 'en')
-      utter.onstart = () => console.log('[ThermosAI] Pending greeting played on interaction')
-      try { window.speechSynthesis.speak(utter) } catch(e){}
-    }
     const text = input.trim()
     if (!text) return
     setInput('')
-    processQuestion(text)
-  }
-
-  const handleClear = () => {
-    messagesRef.current = []
-    setMessages([])
-    setNotice(null)
+    ask(text)
   }
 
   return (
@@ -1016,7 +875,7 @@ function AIAssistantPanel({ volume = 70 }: { volume?: number }) {
         <div className="heading-title">
           <Bot size={25} />
           <div>
-            <h2>THERMOS AI</h2>
+            <h2>TURBO AI</h2>
             <span>{t('assistant.energyCopilot')}</span>
           </div>
         </div>
@@ -1088,43 +947,33 @@ function AIAssistantPanel({ volume = 70 }: { volume?: number }) {
         <WaveBars />
         <button
           type="button"
-          aria-label={continuous ? (language === 'hi' ? 'वOICE रोकें' : 'Stop voice') : t('assistant.tapToSpeak')}
-          title={continuous ? (language === 'hi' ? 'वOICE रोकें' : 'Stop voice') : t('assistant.tapToSpeak')}
+          aria-label={voice.voiceActive ? t('assistant.stopVoice') : t('assistant.tapToSpeak')}
+          title={voice.voiceActive ? t('assistant.stopVoice') : t('assistant.tapToSpeak')}
           onClick={() => {
-            // Play pending greeting on first interaction if autoplay blocked
-            if (pendingGreetingRef.current) {
-              const text = pendingGreetingRef.current
-              pendingGreetingRef.current = null
-              const utter = createUtterance(text, language === 'hi' ? 'hi' : 'en')
-              utter.onstart = () => console.log('[ThermosAI] Pending greeting played on interaction')
-              try { window.speechSynthesis.speak(utter) } catch(e){}
-            }
-            if (continuous) {
-              // Stop continuous voice mode entirely
-              stopListening()
-            } else if (voiceState === 'speaking') {
-              stopSpeaking()
+            if (voice.voiceActive) {
+              voice.stopListening()
+            } else if (voice.state === 'speaking') {
+              voice.interruptSpeech()
             } else {
-              // Start continuous voice conversation
-              startListening((text) => {
-                processQuestion(text)
-              })
+              voice.startListening(ask)
             }
           }}
-          style={continuous ? { borderColor: 'var(--amber)', boxShadow: '0 0 22px var(--amber)' } : voiceState === 'speaking' ? { borderColor: 'var(--cyan)' } : undefined}
+          style={
+            voice.voiceActive
+              ? { borderColor: 'var(--amber)', boxShadow: '0 0 22px var(--amber)' }
+              : voice.state === 'speaking'
+                ? { borderColor: 'var(--cyan)' }
+                : undefined
+          }
         >
           <Mic size={38} />
         </button>
         <WaveBars reverse />
-        <span>
-          {continuous
-            ? (voiceState === 'listening' ? (language === 'hi' ? 'सुन रहा हूँ...' : 'Listening...') : voiceState === 'processing' ? (language === 'hi' ? 'प्रक्रमण...' : 'Processing...') : voiceState === 'speaking' ? (language === 'hi' ? 'बोल रहा हूँ...' : 'Speaking...') : language === 'hi' ? 'वOICE सक्रिय' : 'Voice active')
-            : voiceState === 'listening' ? (language === 'hi' ? 'सुन रहा हूँ...' : 'Listening...') : voiceState === 'processing' ? (language === 'hi' ? 'प्रक्रमण...' : 'Processing...') : voiceState === 'speaking' ? (language === 'hi' ? 'बोल रहा हूँ...' : 'Speaking...') : voiceState === 'error' ? voiceMessage || (language === 'hi' ? 'त्रुटि' : 'Error') : t('assistant.tapToSpeak')}
-        </span>
+        <span>{statusText}</span>
       </div>
-      {!isSupported && (
+      {!voice.isSupported && (
         <div style={{ padding: '0 14px 8px', fontSize: 12, color: 'var(--muted)' }}>
-          {language === 'hi' ? 'इस ब्राउज़र में आवाज़ इनपुट समर्थित नहीं है। कृपya टेक्स्ट दर्ज करें।' : 'Voice input is unavailable. Please type your question.'}
+          {t('voice.unsupported')}
         </div>
       )}
 
@@ -1147,17 +996,10 @@ function AIAssistantPanel({ volume = 70 }: { volume?: number }) {
               type="button"
               className="icon-button"
               style={{ marginLeft: 10, fontSize: 11 }}
-              onClick={() => {
-                if (retryText) {
-                  const txt = retryText
-                  setRetryText(null)
-                  setNotice(null)
-                  processQuestion(txt)
-                }
-              }}
-              aria-label={language === 'hi' ? 'पुनः प्रयास करें' : 'Retry'}
+              onClick={retry}
+              aria-label={t('assistant.retry')}
             >
-              {language === 'hi' ? 'पुनः प्रयास' : 'Retry'}
+              {t('assistant.retry')}
             </button>
           )}
         </div>
@@ -1166,56 +1008,27 @@ function AIAssistantPanel({ volume = 70 }: { volume?: number }) {
         <button
           type="button"
           className="icon-button"
-          aria-label={language === 'hi' ? 'वर्तमान उत्तर रोकें' : 'Interrupt response'}
-          title={language === 'hi' ? 'वर्तमान उत्तर रोकें' : 'Interrupt response'}
-          onClick={() => {
-            setInterrupted(true)
-            setNotice(language === 'hi' ? 'उत्तर रोका गया।' : 'Response interrupted.')
-            stopSpeaking()
-            if (abortControllerRef.current) {
-              abortControllerRef.current.abort()
-              console.log('[ThermosAI] LLM request interrupted by user')
-            }
-            // Resume listening if continuous mode is on
-            if (continuous) {
-              setTimeout(() => {
-                try { startListening((txt) => processQuestion(txt)) } catch(e){}
-              }, 200)
-            }
-          }}
+          aria-label={t('assistant.interrupt')}
+          title={t('assistant.interrupt')}
+          onClick={interrupt}
         >
           <Pause size={16} />
         </button>
         <button
           type="button"
           className="icon-button"
-          aria-label={agentPaused ? (language === 'hi' ? 'सहायक Resume करें' : 'Resume agent') : (language === 'hi' ? 'सहायक रोकें' : 'Pause agent')}
-          title={agentPaused ? (language === 'hi' ? 'सहायक Resume करें' : 'Resume agent') : (language === 'hi' ? 'सहायक रोकें' : 'Pause agent')}
-          onClick={() => {
-            if (agentPaused) {
-              setAgentPaused(false)
-              setNotice(null)
-              console.log('[ThermosAI] Agent resumed')
-              if (continuous) {
-                setTimeout(() => {
-                  try { startListening((txt) => processQuestion(txt)) } catch(e){}
-                }, 300)
-              }
-            } else {
-              setAgentPaused(true)
-              setNotice(language === 'hi' ? 'सहायक रुका हुआ है।' : 'Agent paused.')
-              console.log('[ThermosAI] Agent paused')
-              stopListening()
-              stopSpeaking()
-              if (abortControllerRef.current) {
-                abortControllerRef.current.abort()
-              }
-            }
-          }}
+          aria-label={agentPaused ? t('assistant.resumeAgent') : t('assistant.pauseAgent')}
+          title={agentPaused ? t('assistant.resumeAgent') : t('assistant.pauseAgent')}
+          onClick={togglePause}
         >
           {agentPaused ? <Play size={16} /> : <Pause size={16} />}
         </button>
-        <button onClick={handleClear} className="icon-button" title={language === 'hi' ? 'स chat साफ करें' : 'Clear chat'}>
+        <button
+          onClick={clearChat}
+          className="icon-button"
+          title={t('assistant.clearChat')}
+          aria-label={t('assistant.clearChat')}
+        >
           <Trash2 size={16} />
         </button>
       </div>

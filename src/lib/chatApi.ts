@@ -1,5 +1,6 @@
 import type { Language } from '../i18n/translations'
 import type { TelemetryData } from '../telemetry/types'
+import { diag, newRequestId } from './diagnostics'
 
 export interface ChatTurn {
   role: 'user' | 'assistant'
@@ -12,11 +13,14 @@ export interface SendChatOptions {
   telemetry: TelemetryData
   timeoutMs?: number
   signal?: AbortSignal
+  /** Correlation id sent to the backend and included in diagnostics. */
+  requestId?: string
 }
 
 const CHAT_ERROR_CODES = [
   'network',
   'timeout',
+  'aborted',
   'rate_limit',
   'missing_key',
   'missing_model',
@@ -25,36 +29,14 @@ const CHAT_ERROR_CODES = [
   'invalid_request',
   'server_error',
   'upstream',
+  'not_found',
   'unknown',
 ] as const
 
 export type ChatErrorCode = (typeof CHAT_ERROR_CODES)[number]
 
 const DEFAULT_TIMEOUT_MS = 40000
-
-export async function sendChatWithRetry(options: SendChatOptions, maxRetries = 2): Promise<string> {
-  let lastError: unknown
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      const result = await sendChat(options)
-      return result
-    } catch (error) {
-      lastError = error
-      if (error instanceof ChatError && error.code === 'rate_limit' && attempt < maxRetries) {
-        // Bounded exponential backoff with jitter: 1000ms * 2^attempt + random 0-1000ms
-        const base = 1000 * Math.pow(2, attempt)
-        const jitter = Math.random() * 1000
-        const delay = Math.min(base + jitter, 8000)
-        console.log(`[ThermosAI DEBUG] Rate limit hit — retry ${attempt + 1}/${maxRetries} in ${Math.round(delay)}ms`)
-        await new Promise((r) => setTimeout(r, delay))
-        continue
-      }
-      // Do not retry abort, auth, missing key/model, invalid request, model unavailable
-      throw error
-    }
-  }
-  throw lastError
-}
+const CHAT_ENDPOINT = '/api/chat'
 
 export class ChatError extends Error {
   code: ChatErrorCode
@@ -70,50 +52,74 @@ function isChatErrorCode(value: unknown): value is ChatErrorCode {
   return typeof value === 'string' && (CHAT_ERROR_CODES as readonly string[]).includes(value)
 }
 
+/**
+ * Maps an HTTP status to an error code when the backend could not provide a
+ * machine-readable code (for example a Vercel 404 HTML page).
+ */
+function inferCode(status: number, code: unknown): ChatErrorCode {
+  if (isChatErrorCode(code)) return code
+  if (status === 404) return 'not_found'
+  if (status === 429) return 'rate_limit'
+  if (status === 401 || status === 403) return 'auth'
+  if (status === 400 || status === 413 || status === 405) return 'invalid_request'
+  if (status === 408 || status === 504) return 'timeout'
+  if (status === 503) return 'upstream'
+  if (status >= 500) return 'server_error'
+  return 'unknown'
+}
+
 const FRIENDLY_MESSAGES: Record<ChatErrorCode, Record<Language, string>> = {
   network: {
-    en: "I can't reach the Thermos AI backend. Check that the server is running — showing built-in answers for now.",
-    hi: 'AI बैकएंड से कनेक्ट नहीं हो पा रहा। सर्वर चालू है यह जाँचें — इस बीच बिल्ट-इन उत्तर दिखाए जा रहे हैं।',
+    en: "Couldn't reach the Turbo AI service. Check your connection (and the local server if you're running locally), then try again.",
+    hi: 'Turbo AI सेवा से कनेक्ट नहीं हो पा रहा। अपना कनेक्शन जाँचें (और लोकल चलाने पर सर्वर भी), फिर पुनः प्रयास करें।',
   },
   timeout: {
-    en: 'The Gemini model took too long to respond — showing local telemetry snapshot.',
-    hi: 'Gemini मॉडल का उत्तर आने में बहुत समय लगा — इस बीच स्थानीय डेटा दिखाया जा रहा है।',
+    en: 'The assistant took too long to respond. Please try again.',
+    hi: 'सहायक का उत्तर आने में बहुत समय लगा। कृपया पुनः प्रयास करें।',
+  },
+  aborted: {
+    en: 'Request cancelled.',
+    hi: 'अनुरोध रद्द किया गया।',
   },
   rate_limit: {
-    en: 'The Gemini service is rate limited right now — showing local telemetry snapshot.',
-    hi: 'Gemini सेवा रेट लिमिटेड है — इस बीच स्थानीय डेटा दिखाया जा रहा है।',
+    en: 'The assistant is handling too many requests right now. Please try again in a moment.',
+    hi: 'सहायक अभी बहुत अधिक अनुरोध संभाल रहा है। कुछ क्षण बाद पुनः प्रयास करें।',
   },
   missing_key: {
-    en: "Gemini isn't configured yet — set GEMINI_API_KEY in the server .env file. Showing local telemetry snapshot.",
-    hi: 'Gemini सेटअप अधूरा है — सर्वर .env में GEMINI_API_KEY सेट करें। इस बीच स्थानीय डेटा दिखाया जा रहा है।',
+    en: "Turbo AI isn't configured on this server yet (missing GEMINI_API_KEY). Please try again later.",
+    hi: 'इस सर्वर पर Turbo AI कॉन्फ़िगर नहीं है (GEMINI_API_KEY अनुपलब्ध)। कृपया बाद में पुनः प्रयास करें।',
   },
   missing_model: {
-    en: "Gemini isn't configured yet — set GEMINI_MODEL in the server .env file. Showing local telemetry snapshot.",
-    hi: 'Gemini सेटअप अधूरा है — सर्वर .env में GEMINI_MODEL सेट करें। इस बीच स्थानीय डेटा दिखाया जा रहा है।',
+    en: "Turbo AI isn't configured on this server yet (missing GEMINI_MODEL). Please try again later.",
+    hi: 'इस सर्वर पर Turbo AI कॉन्फ़िगर नहीं है (GEMINI_MODEL अनुपलब्ध)। कृपया बाद में पुनः प्रयास करें।',
   },
   auth: {
-    en: 'Gemini rejected the API key — showing local telemetry snapshot.',
-    hi: 'Gemini ने API कुंजी अस्वीकार की — इस बीच स्थानीय डेटा दिखाया जा रहा है।',
+    en: 'Turbo AI could not authenticate with the AI service. Please contact support.',
+    hi: 'Turbo AI AI सेवा से प्रमाणित नहीं हो सका। कृपया सपोर्ट से संपर्क करें।',
   },
   model_unavailable: {
-    en: 'The selected Gemini model is unavailable right now — showing local telemetry snapshot.',
-    hi: 'चुना गया Gemini मॉडल अभी उपलब्ध नहीं है — इस बीच स्थानीय डेटा दिखाया जा रहा है।',
+    en: 'The AI model is unavailable right now. Please try again shortly.',
+    hi: 'AI मॉडल अभी अनुपलब्ध है। कृपया थोड़ी देर बाद पुनः प्रयास करें।',
   },
   invalid_request: {
-    en: "The assistant couldn't process your request — showing local telemetry snapshot.",
-    hi: 'सहायक अनुरोध नहीं समझ सका — इस बीच स्थानीय डेटा दिखाया जा रहा है।',
+    en: "The assistant couldn't process that request. Please rephrase and try again.",
+    hi: 'सहायक यह अनुरोध नहीं समझ सका। कृपया दोबारा लिखकर पुनः प्रयास करें।',
   },
   server_error: {
-    en: "Something went wrong on the server — showing local telemetry snapshot.",
-    hi: 'सर्वर पर कुछ समस्या हुई — इस बीच स्थानीय डेटा दिखाया जा रहा है।',
+    en: 'Something went wrong on the server. Please try again.',
+    hi: 'सर्वर पर कुछ समस्या हुई। कृपया पुनः प्रयास करें।',
   },
   upstream: {
-    en: 'The Gemini service is unavailable right now — showing local telemetry snapshot.',
-    hi: 'Gemini सेवा अभी अनुपलब्ध है — इस बीच स्थानीय डेटा दिखाया जा रहा है।',
+    en: 'The AI service is unavailable right now. Please try again shortly.',
+    hi: 'AI सेवा अभी अनुपलब्ध है। कृपया थोड़ी देर बाद पुनः प्रयास करें।',
+  },
+  not_found: {
+    en: "The AI endpoint isn't available on this deployment. Please contact support.",
+    hi: 'इस डिप्लॉयमेंट पर AI एंडपॉइंट उपलब्ध नहीं है। कृपया सपोर्ट से संपर्क करें।',
   },
   unknown: {
-    en: "Couldn't get an answer from the assistant — showing local telemetry snapshot.",
-    hi: 'सहायक से उत्तर नहीं मिल सका — इस बीच स्थानीय डेटा दिखाया जा रहा है।',
+    en: "Couldn't get an answer from Turbo AI. Please try again.",
+    hi: 'Turbo AI से उत्तर नहीं मिल सका। कृपया पुनः प्रयास करें।',
   },
 }
 
@@ -122,39 +128,114 @@ interface ChatApiResponse {
   error?: { code?: unknown; message?: unknown }
 }
 
-export async function sendChat(options: SendChatOptions): Promise<string> {
-  const { messages, language, telemetry, timeoutMs = DEFAULT_TIMEOUT_MS, signal: externalSignal } = options
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-
+async function readJson(response: Response): Promise<ChatApiResponse | null> {
   try {
-    const response = await fetch('/api/chat', {
+    return (await response.json()) as ChatApiResponse | null
+  } catch {
+    // Non-JSON bodies (for example a Vercel HTML error page) are expected here.
+    return null
+  }
+}
+
+/**
+ * Sends one chat request to the backend (`/api/chat`) with:
+ *  - a request timeout that works even when an external AbortSignal is supplied,
+ *  - safe parsing of non-2xx and malformed responses,
+ *  - a request id shared with backend logs.
+ *
+ * Never exposes API keys — those live only on the server.
+ */
+export async function sendChat(options: SendChatOptions): Promise<string> {
+  const {
+    messages,
+    language,
+    telemetry,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    signal: externalSignal,
+    requestId = newRequestId(),
+  } = options
+
+  const controller = new AbortController()
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, timeoutMs)
+  const onExternalAbort = () => controller.abort()
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort()
+    else externalSignal.addEventListener('abort', onExternalAbort, { once: true })
+  }
+
+  const startedAt = Date.now()
+  try {
+    const response = await fetch(CHAT_ENDPOINT, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: externalSignal || controller.signal,
+      headers: { 'Content-Type': 'application/json', 'x-request-id': requestId },
+      signal: controller.signal,
       body: JSON.stringify({ messages, language, telemetry }),
     })
 
-    const payload: ChatApiResponse | null = await response.json().catch(() => null)
+    const payload = await readJson(response)
 
     if (!response.ok) {
-      const code = payload?.error?.code
+      const serverCode = payload?.error?.code
+      const code = inferCode(response.status, serverCode)
       const message = typeof payload?.error?.message === 'string' ? payload.error.message : undefined
-      throw new ChatError(isChatErrorCode(code) ? code : 'unknown', message)
+      diag('chat', 'http-error', { requestId, status: response.status, code })
+      throw new ChatError(code, message)
     }
 
     const reply = payload?.reply
     if (typeof reply !== 'string' || !reply.trim()) {
+      diag('chat', 'malformed-reply', { requestId, status: response.status })
       throw new ChatError('upstream')
     }
+
+    diag('chat', 'ok', { requestId, status: response.status, ms: Date.now() - startedAt })
     return reply.trim()
   } catch (error) {
     if (error instanceof ChatError) throw error
-    if ((error as Error)?.name === 'AbortError') throw new ChatError('timeout')
+    const name = (error as Error)?.name
+    if (name === 'AbortError') {
+      if (timedOut) {
+        diag('chat', 'timeout', { requestId, ms: Date.now() - startedAt })
+        throw new ChatError('timeout')
+      }
+      diag('chat', 'aborted', { requestId, ms: Date.now() - startedAt })
+      throw new ChatError('aborted')
+    }
+    diag('chat', 'network-error', { requestId, ms: Date.now() - startedAt })
     throw new ChatError('network')
   } finally {
     clearTimeout(timer)
+    externalSignal?.removeEventListener('abort', onExternalAbort)
   }
+}
+
+/**
+ * Retries only rate-limited requests with bounded backoff. Auth, abort,
+ * configuration and invalid-request errors are never retried.
+ */
+export async function sendChatWithRetry(options: SendChatOptions, maxRetries = 2): Promise<string> {
+  let lastError: unknown
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await sendChat(options)
+    } catch (error) {
+      lastError = error
+      const retryable = error instanceof ChatError && error.code === 'rate_limit'
+      if (retryable && attempt < maxRetries) {
+        const base = 1000 * Math.pow(2, attempt)
+        const delay = Math.min(base + Math.random() * 1000, 8000)
+        diag('chat', 'rate-limit-retry', { attempt: attempt + 1, delayMs: Math.round(delay) })
+        await new Promise((resolve) => setTimeout(resolve, delay))
+        continue
+      }
+      throw error
+    }
+  }
+  throw lastError
 }
 
 export function friendlyChatError(error: unknown, language: Language): string {

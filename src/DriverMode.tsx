@@ -1,88 +1,80 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Leaf, Mic, Send, Battery, Cog, Thermometer, Activity, Clock3, Zap, Truck, Pause, Play } from 'lucide-react'
 import { useLanguage } from './i18n/LanguageContext'
 import { useTelemetry } from './telemetry/useTelemetry'
-import { sendChatWithRetry } from './lib/chatApi'
 import { useVoiceAssistant } from './telemetry/useVoiceAssistant'
-import { createUtterance } from './telemetry/speechController'
+import { useAssistantChat } from './telemetry/useAssistantChat'
+import { isVoiceOutputEnabled, speakOnce } from './telemetry/speechController'
+import { diag } from './lib/diagnostics'
+
+const GREETING_EN = "Hello! I'm Turbo AI, your intelligent energy assistant."
+const GREETING_HI = 'नमस्ते! मैं टर्बो AI हूँ, आपका स्मार्ट ऊर्जा सहायक।'
 
 export function DriverModePanel({ onClose, volume = 70 }: { onClose: () => void; volume?: number }) {
   const { t, language } = useLanguage()
   const { telemetry } = useTelemetry()
-  const [messages, setMessages] = useState<{ role: 'user' | 'assistant'; text: string; time: string }[]>([
-    { role: 'assistant', text: language === 'hi' ? 'नमस्ते! मैं Thermos AI हूँ, आपका स्मार्ट ऊर्जा सहायक।' : "Hello! I'm Thermos AI, your intelligent energy assistant.", time: '06:30 PM' },
-  ])
   const [input, setInput] = useState('')
-  const [loading, setLoading] = useState(false)
   const [showHelp, setShowHelp] = useState(true)
-  const [spokenGreeting, setSpokenGreeting] = useState(false)
-  const [interrupted, setInterrupted] = useState(false)
-  const [agentPaused, setAgentPaused] = useState(false)
-  const messagesRef = useRef(messages)
+
+  const greeting = language === 'hi' ? GREETING_HI : GREETING_EN
+  const voice = useVoiceAssistant(language, volume ? volume / 100 : 0.7)
+  const { messages, loading, notice, retryText, agentPaused, ask, retry, interrupt, togglePause } =
+    useAssistantChat({ language, voice, greeting })
+
   const messagesEndRef = useRef<HTMLDivElement | null>(null)
-  const abortControllerRef = useRef<AbortController | null>(null)
-  const { isSupported, continuous, startListening, stopListening, speak, stopSpeaking } = useVoiceAssistant(language, volume ? volume / 100 : 0.7)
+  const spokenGreetingLanguages = useRef<Set<string>>(new Set())
 
-  useEffect(() => { messagesRef.current = messages }, [messages])
-  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
+  const greetingBusy = loading || voice.state === 'processing' || voice.state === 'speaking'
 
-  // Update greeting text when language changes
+  // One greeting per selected language, never during an answer, never twice
+  // (the language Set plus the single-attempt speak call guard Strict Mode
+  // double-effects and rerenders).
   useEffect(() => {
-    setMessages((prev) => {
-      if (prev.length === 1 && prev[0].role === 'assistant') {
-        return [{ ...prev[0], text: language === 'hi' ? 'नमस्ते! मैं Thermos AI हूँ, आपका स्मार्ट ऊर्जा सहायक।' : "Hello! I'm Thermos AI, your intelligent energy assistant.", time: prev[0].time }]
-      }
-      return prev
-    })
-  }, [language])
-
-  // Speak greeting once when permitted (shared speech controller, no duplicate)
-  useEffect(() => {
-    if (!spokenGreeting && isSupported && !agentPaused && !interrupted) {
-      setSpokenGreeting(true)
-      const greetingText = messages[0]?.text || (language === 'hi' ? 'नमस्ते!' : 'Hello!')
-      const utter = createUtterance(greetingText, language === 'hi' ? 'hi' : 'en')
-      utter.onstart = () => console.log('[ThermosAI] Driver greeting started')
-      utter.onerror = () => console.log('[ThermosAI] Driver greeting error')
-      utter.onend = () => console.log('[ThermosAI] Driver greeting ended')
-      try { window.speechSynthesis.speak(utter) } catch(e){}
-    }
-  }, [language, isSupported, agentPaused, interrupted, spokenGreeting, messages])
-
-  const processQuestion = useCallback((text: string) => {
-    if (agentPaused) {
-      setLoading(false)
+    if (spokenGreetingLanguages.current.has(language)) return
+    if (greetingBusy) return
+    if (!isVoiceOutputEnabled()) {
+      spokenGreetingLanguages.current.add(language)
+      diag('greeting', 'driver-skipped-muted', { lang: language })
       return
     }
-    if (interrupted) setInterrupted(false)
-    if (abortControllerRef.current) abortControllerRef.current.abort()
-    abortControllerRef.current = new AbortController()
-    const controller = abortControllerRef.current
-    const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    const userEntry = { role: 'user' as const, text, time: timeStr }
-    const history = [...messagesRef.current, userEntry].slice(-12).map((m) => ({ role: m.role, content: m.text }))
-    messagesRef.current = [...messagesRef.current, userEntry]
-    setMessages((prev) => [...prev, userEntry])
-    setLoading(true)
-    sendChatWithRetry({ messages: history, language, telemetry, signal: controller.signal })
-      .then((reply) => {
-        if (interrupted || controller.signal.aborted) return
-        setMessages((prev) => [...prev, { role: 'assistant', text: reply, time: timeStr }])
-        if (isSupported && !agentPaused) speak(reply)
-      })
-      .catch((_err) => {
-        if (interrupted || controller.signal.aborted) return
-        const fallback = telemetry ? `Battery ${Math.round(telemetry.batteryCharge)}%, RPM ${Math.round(telemetry.rpm)}, Temp ${Math.round(telemetry.temperatureCelsius)}°C, Pressure ${telemetry.pressureBar} bar, Recovered ${telemetry.recoveredPowerWatts} W` : 'Telemetry unavailable';
-        setMessages((prev) => [...prev, { role: 'assistant', text: fallback + ' (local answer — AI unavailable)', time: timeStr }])
-        if (isSupported && !agentPaused) speak(fallback + ' (local answer — AI unavailable)')
-      })
-      .finally(() => setLoading(false))
-  }, [language, telemetry, isSupported, speak, interrupted, agentPaused])
+    spokenGreetingLanguages.current.add(language)
+    diag('greeting', 'driver-play', { lang: language })
+    void speakOnce(greeting, language === 'hi' ? 'hi' : 'en').then((outcome) => {
+      diag('greeting', 'driver-outcome', { outcome })
+    })
+  }, [language, greeting, greetingBusy])
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages])
+
+  const submitInput = () => {
+    const text = input.trim()
+    if (!text) return
+    setInput('')
+    ask(text)
+  }
 
   const examplesHi = `उदाहरण: "बैटरी कितना चार्ज है?" | "RPM कितना है?" | "तापमान ज्यादा है?"`
   const examplesEn = `Examples: "How much battery left?" | "Engine RPM?" | "Is temperature high?"`
 
-  const statusText = loading ? (language === 'hi' ? 'सोच रहा हूँ...' : 'Thinking...') : (language === 'hi' ? 'तैयार' : 'Ready')
+  const statusText = loading
+    ? language === 'hi'
+      ? 'सोच रहा हूँ...'
+      : 'Thinking...'
+    : voice.state === 'processing'
+      ? language === 'hi'
+        ? 'प्रोसेसिंग...'
+        : 'Processing...'
+      : voice.state === 'speaking'
+        ? language === 'hi'
+          ? 'बोल रहा हूँ...'
+          : 'Speaking...'
+        : voice.message
+          ? voice.message
+          : language === 'hi'
+            ? 'तैयार'
+            : 'Ready'
 
   return (
     <div className="driver-overlay" role="dialog" aria-modal="true" aria-label={language === 'hi' ? 'डriver मोड' : 'Driver Mode'}>
@@ -91,7 +83,7 @@ export function DriverModePanel({ onClose, volume = 70 }: { onClose: () => void;
           <div className="heading-title">
             <Truck size={28} />
             <div>
-              <h2>Thermos AI — Driver Assistant</h2>
+              <h2>Turbo AI — Driver Assistant</h2>
               <span>{language === 'hi' ? 'डriver सहायिका' : 'Driver Assistant'}</span>
             </div>
           </div>
@@ -101,7 +93,7 @@ export function DriverModePanel({ onClose, volume = 70 }: { onClose: () => void;
         </div>
 
         <div className="driver-help">
-          <button type="button" className="help-toggle" onClick={() => setShowHelp(s => !s)}>
+          <button type="button" className="help-toggle" onClick={() => setShowHelp((s) => !s)}>
             {language === 'hi' ? 'इस्तेमाल कैसे करें' : 'How to Use'}
           </button>
           {showHelp && (
@@ -110,7 +102,7 @@ export function DriverModePanel({ onClose, volume = 70 }: { onClose: () => void;
               <ol>
                 <li>{language === 'hi' ? 'माइक्रोफोन दबाएँ या प्रश्न टाइप करें।' : 'Tap microphone or type a question.'}</li>
                 <li>{language === 'hi' ? 'बैटरी, RPM, तापमान, दबाव, या ऊर्जा के बारे में पूछें।' : 'Ask about battery, RPM, temperature, pressure, or energy.'}</li>
-                <li>{language === 'hi' ? 'Thermos AI का इंतज़ार करें।' : 'Wait while Thermos AI prepares the answer.'}</li>
+                <li>{language === 'hi' ? 'टर्बो AI का इंतज़ार करें।' : 'Wait while Turbo AI prepares the answer.'}</li>
                 <li>{language === 'hi' ? 'उत्तर पढ़ें या सुनें।' : 'Read or listen to the answer.'}</li>
                 <li>{language === 'hi' ? 'रोकें (Interrupt) से वर्तमान उत्तर रोकें।' : 'Use Interrupt to stop the current answer.'}</li>
                 <li>{language === 'hi' ? 'Pause Agent से अस्थायी रूप से रोकें।' : 'Use Pause Agent to temporarily pause.'}</li>
@@ -160,25 +152,67 @@ export function DriverModePanel({ onClose, volume = 70 }: { onClose: () => void;
           )}
         </div>
 
+        {notice && (
+          <div className="chat-notice" role="alert">
+            <span>{notice}</span>
+            {retryText && (
+              <button
+                type="button"
+                className="icon-button"
+                style={{ marginLeft: 10, fontSize: 11 }}
+                onClick={retry}
+                aria-label={language === 'hi' ? 'पुनः प्रयास' : 'Retry'}
+              >
+                {language === 'hi' ? 'पुनः प्रयास' : 'Retry'}
+              </button>
+            )}
+          </div>
+        )}
+
         <div className="driver-controls">
-          <button type="button" className="icon-button large" aria-label={language === 'hi' ? 'बोलने के लिए टैप करें' : 'Tap to speak'} onClick={() => {
-            if (continuous) { stopListening(); }
-            else if (isSupported) { startListening((txt) => processQuestion(txt)); }
-          }}>
+          <button
+            type="button"
+            className="icon-button large"
+            aria-label={voice.voiceActive ? (language === 'hi' ? 'आवाज़ रोकें' : 'Stop voice') : language === 'hi' ? 'बोलने के लिए टैप करें' : 'Tap to speak'}
+            onClick={() => {
+              if (voice.voiceActive) voice.stopListening()
+              else if (voice.state === 'speaking') voice.interruptSpeech()
+              else if (voice.isSupported) voice.startListening(ask)
+            }}
+          >
             <Mic size={40} />
           </button>
-          <button type="button" className="icon-button" aria-label={language === 'hi' ? 'रोकें' : 'Interrupt'} onClick={() => { setInterrupted(true); stopSpeaking(); if (abortControllerRef.current) abortControllerRef.current.abort(); }}>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label={language === 'hi' ? 'रोकें' : 'Interrupt'}
+            title={language === 'hi' ? 'रोकें' : 'Interrupt'}
+            onClick={interrupt}
+          >
             <Pause size={20} />
           </button>
-          <button type="button" className="icon-button" aria-label={agentPaused ? (language === 'hi' ? 'जारी रखें' : 'Resume') : (language === 'hi' ? 'रोकें' : 'Pause')} onClick={() => { if (agentPaused) { setAgentPaused(false); if (continuous) startListening((txt) => processQuestion(txt)); } else { setAgentPaused(true); stopListening(); stopSpeaking(); if (abortControllerRef.current) abortControllerRef.current.abort(); } }}>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label={agentPaused ? (language === 'hi' ? 'जारी रखें' : 'Resume') : (language === 'hi' ? 'रोकें' : 'Pause')}
+            title={agentPaused ? (language === 'hi' ? 'जारी रखें' : 'Resume') : (language === 'hi' ? 'रोकें' : 'Pause')}
+            onClick={togglePause}
+          >
             {agentPaused ? <Play size={20} /> : <Pause size={20} />}
           </button>
           <div className="chat-input driver-input">
-            <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && processQuestion(input.trim())} placeholder={language === 'hi' ? 'प्रश्न लिखें...' : 'Type your question...'} />
-            <button type="button" aria-label={t('assistant.send')} onClick={() => { if (input.trim()) processQuestion(input.trim()); setInput('') }}><Send size={24} /></button>
+            <input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && submitInput()}
+              placeholder={language === 'hi' ? 'प्रश्न लिखें...' : 'Type your question...'}
+            />
+            <button type="button" aria-label={t('assistant.send')} onClick={submitInput}>
+              <Send size={24} />
+            </button>
           </div>
         </div>
       </div>
     </div>
-  );
+  )
 }
