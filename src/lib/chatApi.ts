@@ -36,7 +36,16 @@ const CHAT_ERROR_CODES = [
 export type ChatErrorCode = (typeof CHAT_ERROR_CODES)[number]
 
 const DEFAULT_TIMEOUT_MS = 40000
-const CHAT_ENDPOINT = '/api/chat'
+
+/**
+ * Production (Vercel) points at the Render backend via VITE_API_BASE_URL,
+ * baked in at build time. Locally it stays empty so the relative path is
+ * proxied by Vite to the Express server (see vite.config.ts).
+ */
+const API_BASE_URL = String(import.meta.env.VITE_API_BASE_URL ?? '')
+  .trim()
+  .replace(/\/+$/, '')
+const CHAT_ENDPOINT = `${API_BASE_URL}/api/chat`
 
 export class ChatError extends Error {
   code: ChatErrorCode

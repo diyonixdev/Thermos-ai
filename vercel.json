@@ -1,7 +1,5 @@
 {
-  "functions": {
-    "api/chat.js": {
-      "maxDuration": 60
-    }
-  }
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "framework": "vite"
 }
